@@ -43,6 +43,26 @@ module.exports = (sequelize) => {
       allowNull: true,
       comment: 'Saved campus delivery address schema',
     },
+    registerNumber: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      comment: 'Student register / roll number',
+    },
+    year: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      comment: 'Current academic year (e.g. 1, 2, 3, 4)',
+    },
+    passOutYear: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      comment: 'Expected graduation / pass-out year',
+    },
+    mustChangePassword: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+      comment: 'Flag indicating temporary password requires change on first login',
+    },
     status: {
       type: DataTypes.ENUM('active', 'inactive', 'suspended'),
       defaultValue: 'active',

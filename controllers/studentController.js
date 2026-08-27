@@ -1,5 +1,5 @@
 const { Op } = require('sequelize');
-const { Institution, Vendor, Product, Order, OrderItem, Review, Complaint, User } = require('../models');
+const { sequelize, Institution, Vendor, Product, Order, OrderItem, Review, Complaint, User } = require('../models');
 
 // Helper to calculate start of today
 const getStartOfToday = () => {
@@ -341,12 +341,29 @@ const createOrder = async (req, res) => {
       });
     }
 
-    const unavailableItem = dbProducts.find((p) => p.isAvailable === false);
-    if (unavailableItem) {
-      return res.status(400).json({
-        success: false,
-        message: `Item "${unavailableItem.name}" is currently out of stock. Please remove it to proceed.`,
-      });
+    for (const cartItem of items) {
+      const dbProd = dbProducts.find((p) => p.id === cartItem.id);
+      const requestedQty = cartItem.quantity || 1;
+
+      if (!dbProd.isAvailable) {
+        return res.status(400).json({
+          success: false,
+          message: `Item "${dbProd.name}" is currently unavailable for purchase.`,
+        });
+      }
+
+      if (dbProd.stock < requestedQty) {
+        if (dbProd.stock <= 0) {
+          return res.status(400).json({
+            success: false,
+            message: `"${dbProd.name}" is out of stock. Please remove it from your cart.`,
+          });
+        }
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock for "${dbProd.name}". Only ${dbProd.stock} unit(s) remain.`,
+        });
+      }
     }
 
     let subtotal = 0;
@@ -379,58 +396,97 @@ const createOrder = async (req, res) => {
     const orderId = `ord_${Date.now().toString(36)}`;
     const pickupCode = `SD-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    const order = await Order.create({
-      id: orderId,
-      userId,
-      institutionId,
-      vendorId: primaryVendorId,
-      totalAmount,
-      serviceFee,
-      vendorCount: vendorIdsSet.size,
-      paymentMethod: paymentMethod || 'Campus Card Wallet',
-      deliveryAddress: deliveryAddress || null,
-      pickupNotes: pickupNotes || null,
-      status: 'placed',
-      pickupCode,
-    });
+    // Start Database Transaction for Atomic Stock Reduction & Order Creation
+    const transaction = await sequelize.transaction();
 
-    const orderItemsPayload = itemsToCreate.map((item) => ({
-      orderId: order.id,
-      productId: item.productId,
-      vendorId: item.vendorId,
-      productName: item.productName,
-      price: item.price,
-      quantity: item.quantity,
-      status: 'pending',
-    }));
+    try {
+      // 1. Decrement Product Stock atomically & protect against race conditions
+      for (const item of itemsToCreate) {
+        const dbProd = dbProducts.find((p) => p.id === item.productId);
+        const [affectedRows] = await Product.update(
+          { stock: sequelize.literal(`stock - ${item.quantity}`) },
+          {
+            where: {
+              id: item.productId,
+              institutionId,
+              stock: { [Op.gte]: item.quantity },
+              isAvailable: true,
+            },
+            transaction,
+          }
+        );
 
-    await OrderItem.bulkCreate(orderItemsPayload);
-
-    // Save/update user's saved campus address for future checkouts
-    if (deliveryAddress && typeof deliveryAddress === 'object') {
-      try {
-        await User.update({ savedAddress: deliveryAddress }, { where: { id: userId } });
-      } catch (err) {
-        console.error('Failed to update savedAddress for user:', err.message);
+        if (affectedRows === 0) {
+          await transaction.rollback();
+          const freshProd = await Product.findByPk(item.productId);
+          const remain = freshProd ? freshProd.stock : 0;
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient stock for "${item.productName}". Only ${remain} unit(s) remain.`,
+          });
+        }
       }
-    }
 
-    return res.status(201).json({
-      success: true,
-      message: 'Order placed successfully!',
-      data: {
+      // 2. Create Order record
+      const order = await Order.create({
+        id: orderId,
+        userId,
+        institutionId,
+        vendorId: primaryVendorId,
+        totalAmount,
+        serviceFee,
+        vendorCount: vendorIdsSet.size,
+        paymentMethod: paymentMethod || 'Campus Card Wallet',
+        deliveryAddress: deliveryAddress || null,
+        pickupNotes: pickupNotes || null,
+        status: 'placed',
+        pickupCode,
+      }, { transaction });
+
+      // 3. Create OrderItems payload
+      const orderItemsPayload = itemsToCreate.map((item) => ({
         orderId: order.id,
-        totalAmount: order.totalAmount,
-        serviceFee: order.serviceFee,
-        vendorCount: order.vendorCount,
-        paymentMethod: order.paymentMethod,
-        deliveryAddress: order.deliveryAddress,
-        pickupCode: order.pickupCode,
-        estimatedTime: '10-15 mins',
-        status: order.status,
-        createdAt: order.createdAt,
-      },
-    });
+        productId: item.productId,
+        vendorId: item.vendorId,
+        productName: item.productName,
+        price: item.price,
+        quantity: item.quantity,
+        status: 'pending',
+      }));
+
+      await OrderItem.bulkCreate(orderItemsPayload, { transaction });
+
+      await transaction.commit();
+
+      // Save/update user's saved campus address for future checkouts
+      if (deliveryAddress && typeof deliveryAddress === 'object') {
+        try {
+          await User.update({ savedAddress: deliveryAddress }, { where: { id: userId } });
+        } catch (err) {
+          console.error('Failed to update savedAddress for user:', err.message);
+        }
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: 'Order placed successfully!',
+        data: {
+          orderId: order.id,
+          totalAmount: order.totalAmount,
+          serviceFee: order.serviceFee,
+          vendorCount: order.vendorCount,
+          paymentMethod: order.paymentMethod,
+          deliveryAddress: order.deliveryAddress,
+          pickupCode: order.pickupCode,
+          estimatedTime: '10-15 mins',
+          status: order.status,
+          createdAt: order.createdAt,
+        },
+      });
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
   } catch (error) {
     console.error('createOrder error:', error);
     return res.status(500).json({

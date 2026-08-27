@@ -115,6 +115,14 @@ const getDashboardStats = async (req, res) => {
       where: { vendorId, institutionId },
     });
 
+    const outOfStockCount = await Product.count({
+      where: { vendorId, institutionId, stock: 0 },
+    });
+
+    const lowStockCount = await Product.count({
+      where: { vendorId, institutionId, stock: { [Op.between]: [1, 5] } },
+    });
+
     const lowStockProductsDb = await Product.findAll({
       where: {
         vendorId,
@@ -123,8 +131,6 @@ const getDashboardStats = async (req, res) => {
       },
       limit: 5,
     });
-
-    const lowStockCount = lowStockProductsDb.length;
 
     const topProductsDb = await Product.findAll({
       where: { vendorId, institutionId },
@@ -164,6 +170,7 @@ const getDashboardStats = async (req, res) => {
           pendingOrdersCount,
           totalProducts,
           lowStockCount,
+          outOfStockCount,
         },
         kpi: {
           todaySalesAmount: parseFloat(todaySales.toFixed(2)),
@@ -171,6 +178,7 @@ const getDashboardStats = async (req, res) => {
           pendingOrdersCount,
           totalProductsCount: totalProducts,
           lowStockCount,
+          outOfStockCount,
         },
       },
     });
@@ -314,8 +322,22 @@ const updateOrderStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { status, rejectionReason, orderItemId } = req.body;
-    const vendorId = req.user.vendorId || 'vnd_bites_001';
+    const vendorId = req.user.vendorId;
     const userInstitutionId = req.user.institutionId;
+
+    if (!vendorId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access Denied: User account is not linked to an active campus vendor shop.',
+      });
+    }
+
+    if (!userInstitutionId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access Denied: User account is not associated with a campus institution.',
+      });
+    }
 
     // Check 1: Status Validation
     const validStatuses = ['pending', 'accepted', 'preparing', 'ready', 'completed', 'rejected'];
@@ -459,10 +481,18 @@ const createProduct = async (req, res) => {
     const institutionId = req.user.institutionId;
     const { name, category, price, stock, description, imageUrl, isAvailable } = req.body;
 
-    if (!name || !price || !category) {
+    if (!name || price === undefined || !category) {
       return res.status(400).json({
         success: false,
         message: 'Product name, price, and category are required.',
+      });
+    }
+
+    const parsedStock = stock !== undefined ? parseInt(stock) : 10;
+    if (isNaN(parsedStock) || parsedStock < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Stock quantity must be a non-negative integer (0 or greater).',
       });
     }
 
@@ -473,7 +503,7 @@ const createProduct = async (req, res) => {
       name: name.trim(),
       category: category.trim(),
       price: parseFloat(price),
-      stock: parseInt(stock) || 10,
+      stock: parsedStock,
       description: description ? description.trim() : '',
       imageUrl: imageUrl || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=600&q=80',
       isAvailable: isAvailable !== undefined ? Boolean(isAvailable) : true,
@@ -524,10 +554,20 @@ const updateProduct = async (req, res) => {
 
     const { name, category, price, stock, description, imageUrl, isAvailable } = req.body;
 
+    if (stock !== undefined) {
+      const parsedStock = parseInt(stock);
+      if (isNaN(parsedStock) || parsedStock < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Stock quantity must be a non-negative integer (0 or greater).',
+        });
+      }
+      product.stock = parsedStock;
+    }
+
     if (name !== undefined) product.name = name.trim();
     if (category !== undefined) product.category = category.trim();
     if (price !== undefined) product.price = parseFloat(price);
-    if (stock !== undefined) product.stock = parseInt(stock);
     if (description !== undefined) product.description = description.trim();
     if (imageUrl !== undefined) product.imageUrl = imageUrl;
     if (isAvailable !== undefined) product.isAvailable = Boolean(isAvailable);

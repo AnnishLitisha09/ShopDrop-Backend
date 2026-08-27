@@ -38,4 +38,31 @@ const upload = multer({
   },
 });
 
+// Memory Storage for Excel Bulk Upload Processing
+const excelStorage = multer.memoryStorage();
+const excelFilter = (req, file, cb) => {
+  const allowedExtensions = ['.xlsx', '.xls'];
+  const ext = path.extname(file.originalname).toLowerCase();
+  const allowedMimeTypes = [
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel',
+    'application/octet-stream',
+  ];
+  if (allowedExtensions.includes(ext) || allowedMimeTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Please upload a valid Excel file (.xlsx or .xls).'), false);
+  }
+};
+
+const excelUpload = multer({
+  storage: excelStorage,
+  fileFilter: excelFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit for bulk files
+  },
+});
+
 module.exports = upload;
+module.exports.excelUpload = excelUpload;
+

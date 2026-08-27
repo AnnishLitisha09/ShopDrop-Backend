@@ -284,9 +284,64 @@ const getSuperAdminAnalytics = async (req, res) => {
   }
 };
 
+// @desc    Create / Onboard new campus institution with admin account
+// @route   POST /api/super-admin/institutions
+// @access  Private (Super Admin)
+const createInstitution = async (req, res) => {
+  try {
+    const { name, code, city, domain, adminName, adminEmail } = req.body;
+
+    if (!name || !name.trim()) return res.status(400).json({ success: false, message: 'Institution Name is required.' });
+    if (!code || !code.trim()) return res.status(400).json({ success: false, message: 'Institution Code is required.' });
+    if (!adminEmail || !adminEmail.trim()) return res.status(400).json({ success: false, message: 'Institution Admin Email is required.' });
+
+    const cleanCode = code.trim().toUpperCase();
+    const instId = `inst_${cleanCode.toLowerCase()}_${Date.now().toString(36).substring(4)}`;
+
+    const existingCode = await Institution.findOne({ where: { code: cleanCode } });
+    if (existingCode) {
+      return res.status(400).json({ success: false, message: `Institution code "${cleanCode}" is already in use.` });
+    }
+
+    const bcrypt = require('bcrypt');
+    const defaultPassword = await bcrypt.hash('Password123!', 10);
+
+    const institution = await Institution.create({
+      id: instId,
+      name: name.trim(),
+      code: cleanCode,
+      city: city ? city.trim() : 'Campus City',
+      domain: domain ? domain.trim().toLowerCase().replace(/^@/, '') : 'campus.edu',
+      status: 'active',
+    });
+
+    const adminUser = await User.create({
+      name: adminName ? adminName.trim() : `${name.trim()} Admin`,
+      email: adminEmail.trim().toLowerCase(),
+      password: defaultPassword,
+      role: 'institution_admin',
+      institutionId: institution.id,
+      status: 'active',
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: `Institution "${institution.name}" onboarded successfully!`,
+      data: {
+        institution,
+        adminUser: { id: adminUser.id, email: adminUser.email },
+      },
+    });
+  } catch (error) {
+    console.error('createInstitution error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to onboard institution.' });
+  }
+};
+
 module.exports = {
   getDashboardStats,
   getInstitutionsList,
+  createInstitution,
   updateInstitutionStatus,
   getSuperAdminAnalytics,
 };

@@ -1,6 +1,8 @@
 const { Op } = require('sequelize');
 const bcrypt = require('bcrypt');
-const { Institution, Vendor, Product, Order, OrderItem, User, Complaint } = require('../models');
+const { Institution, Vendor, Product, Order, OrderItem, User, Complaint, sequelize } = require('../models');
+const xlsx = require('xlsx');
+const { generateCommonTemporaryPassword } = require('../utils/passwordGenerator');
 
 // Helper to calculate start of today
 const getStartOfToday = () => {
@@ -634,7 +636,7 @@ const getInstitutionAnalytics = async (req, res) => {
 const getStudents = async (req, res) => {
   try {
     const institutionId = req.user.institutionId;
-    const { search, status } = req.query;
+    const { search, status, year } = req.query;
 
     const whereClause = {
       institutionId,
@@ -645,11 +647,16 @@ const getStudents = async (req, res) => {
       whereClause.status = status.toLowerCase();
     }
 
+    if (year && year !== 'all') {
+      whereClause.year = parseInt(year);
+    }
+
     if (search && search.trim()) {
       const q = `%${search.trim().toLowerCase()}%`;
       whereClause[Op.or] = [
         { name: { [Op.like]: q } },
         { email: { [Op.like]: q } },
+        { registerNumber: { [Op.like]: q } },
       ];
     }
 
@@ -676,8 +683,11 @@ const getStudents = async (req, res) => {
 
       return {
         id: s.id,
+        registerNumber: s.registerNumber || 'N/A',
         name: s.name,
         email: s.email,
+        year: s.year || 1,
+        passOutYear: s.passOutYear || 2027,
         status: s.status || 'active',
         createdAt: s.createdAt,
         updatedAt: s.updatedAt,
@@ -736,8 +746,11 @@ const getStudentDetails = async (req, res) => {
       data: {
         student: {
           id: student.id,
+          registerNumber: student.registerNumber || 'N/A',
           name: student.name,
           email: student.email,
+          year: student.year || 1,
+          passOutYear: student.passOutYear || 2027,
           status: student.status || 'active',
           institutionId: student.institutionId,
           createdAt: student.createdAt,
@@ -766,10 +779,14 @@ const getStudentDetails = async (req, res) => {
 const createStudent = async (req, res) => {
   try {
     const institutionId = req.user.institutionId;
-    const { name, email, password } = req.body;
+    const { registerNumber, name, email, year, passOutYear } = req.body;
+
+    if (!registerNumber || !String(registerNumber).trim()) {
+      return res.status(400).json({ success: false, message: 'Register Number is required.' });
+    }
 
     if (!name || !name.trim()) {
-      return res.status(400).json({ success: false, message: 'Student name is required.' });
+      return res.status(400).json({ success: false, message: 'Student Full Name is required.' });
     }
 
     if (!email || !email.trim()) {
@@ -781,31 +798,80 @@ const createStudent = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please enter a valid email address.' });
     }
 
-    if (!password || password.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters long.' });
+    const institution = await Institution.findByPk(institutionId);
+    if (!institution) {
+      return res.status(404).json({ success: false, message: 'Institution record not found.' });
     }
 
+    // Institutional Email Domain Validation
     const normalizedEmail = email.trim().toLowerCase();
+    if (institution.domain) {
+      const cleanDomain = institution.domain.trim().toLowerCase().replace(/^@/, '');
+      if (!normalizedEmail.endsWith(`@${cleanDomain}`)) {
+        return res.status(400).json({
+          success: false,
+          message: `Email address must be an official campus email ending with @${cleanDomain}`,
+        });
+      }
+    }
+
+    // Academic Year Validation
+    const parsedYear = parseInt(year);
+    if (isNaN(parsedYear) || parsedYear < 1 || parsedYear > 6) {
+      return res.status(400).json({ success: false, message: 'Academic Year must be a valid number (e.g. 1, 2, 3, 4).' });
+    }
+
+    // Currently Pursuing Validation
+    const currentYear = new Date().getFullYear();
+    const parsedPassOutYear = parseInt(passOutYear);
+    if (isNaN(parsedPassOutYear)) {
+      return res.status(400).json({ success: false, message: 'Pass-out Year is required.' });
+    }
+
+    if (parsedPassOutYear <= currentYear) {
+      return res.status(400).json({
+        success: false,
+        message: `Student has already passed out (${parsedPassOutYear}). Only currently pursuing students (pass-out year > ${currentYear}) can be added to ShopDrop.`,
+      });
+    }
+
+    const regNo = String(registerNumber).trim();
+
+    // Check duplicate Register Number in same institution
+    const existingReg = await User.findOne({
+      where: { institutionId, registerNumber: regNo },
+    });
+    if (existingReg) {
+      return res.status(400).json({
+        success: false,
+        message: `Register Number "${regNo}" already exists for a student in this institution.`,
+      });
+    }
 
     // Check duplicate email across system
     const existingUser = await User.findOne({ where: { email: normalizedEmail } });
     if (existingUser) {
       return res.status(400).json({
         success: false,
-        message: 'A user account with this email address already exists.',
+        message: 'A user account with this email address already exists in ShopDrop.',
       });
     }
 
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    // Generate common temporary password
+    const commonPassword = generateCommonTemporaryPassword(institution.code);
+    const hashedPassword = await bcrypt.hash(commonPassword, 10);
 
     const student = await User.create({
+      registerNumber: regNo,
       name: name.trim(),
       email: normalizedEmail,
+      year: parsedYear,
+      passOutYear: parsedPassOutYear,
       password: hashedPassword,
       role: 'student', // FORCED trusted role
       institutionId, // FORCED trusted institution ID
       status: 'active',
+      mustChangePassword: true,
     });
 
     const studentObj = student.toJSON();
@@ -813,9 +879,10 @@ const createStudent = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Student account created successfully!',
+      message: `Student account created for ${studentObj.name}!`,
       data: {
         student: studentObj,
+        temporaryPassword: commonPassword,
       },
     });
   } catch (error) {
@@ -823,6 +890,557 @@ const createStudent = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to create student account.',
+    });
+  }
+};
+
+// @desc    Download standard XLSX template for Student Bulk Import
+// @route   GET /api/institution-admin/students/template
+// @access  Private (Institution Admin)
+const downloadStudentTemplate = async (req, res) => {
+  try {
+    const institutionId = req.user.institutionId;
+    const institution = await Institution.findByPk(institutionId);
+    const instDomain = institution?.domain || 'stanford.edu';
+
+    const wb = xlsx.utils.book_new();
+    const templateData = [
+      ['Register Number', 'Name', 'Email', 'Year', 'Pass-out Year'],
+      ['22IT001', 'John Doe', `john@${instDomain}`, 4, 2027],
+      ['22IT002', 'Jane Smith', `jane@${instDomain}`, 3, 2028],
+      ['22IT003', 'Alex Johnson', `alex@${instDomain}`, 2, 2029],
+    ];
+
+    const ws = xlsx.utils.aoa_to_sheet(templateData);
+    ws['!cols'] = [{ wch: 18 }, { wch: 22 }, { wch: 28 }, { wch: 8 }, { wch: 16 }];
+    xlsx.utils.book_append_sheet(wb, ws, 'Student Import Template');
+
+    const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=ShopDrop_Student_Import_Template.xlsx');
+    return res.send(buffer);
+  } catch (error) {
+    console.error('downloadStudentTemplate error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to generate student import template.' });
+  }
+};
+
+// @desc    Parse and validate uploaded Student Excel file, returning pre-import report
+// @route   POST /api/institution-admin/students/validate-import
+// @access  Private (Institution Admin)
+const validateStudentImport = async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ success: false, message: 'Please upload an Excel file (.xlsx or .xls).' });
+    }
+
+    const institutionId = req.user.institutionId;
+    const institution = await Institution.findByPk(institutionId);
+    if (!institution) {
+      return res.status(404).json({ success: false, message: 'Institution not found.' });
+    }
+
+    const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
+    const firstSheetName = wb.SheetNames[0];
+    const sheet = wb.Sheets[firstSheetName];
+    const rawRows = xlsx.utils.sheet_to_json(sheet, { defval: '' });
+
+    if (!rawRows || rawRows.length === 0) {
+      return res.status(400).json({ success: false, message: 'Uploaded Excel file is empty.' });
+    }
+
+    const currentYear = new Date().getFullYear();
+    const cleanDomain = institution.domain ? institution.domain.trim().toLowerCase().replace(/^@/, '') : null;
+
+    // Fetch existing DB records for institution isolation
+    const existingUsersInInst = await User.findAll({
+      where: { institutionId, role: 'student' },
+      attributes: ['registerNumber', 'email'],
+    });
+
+    const dbRegisterNumbers = new Set(
+      existingUsersInInst.map((u) => u.registerNumber ? String(u.registerNumber).trim().toLowerCase() : null).filter(Boolean)
+    );
+
+    const allGlobalUsers = await User.findAll({ attributes: ['email'] });
+    const dbGlobalEmails = new Set(allGlobalUsers.map((u) => u.email.trim().toLowerCase()));
+
+    const seenRegNoInExcel = new Set();
+    const seenEmailsInExcel = new Set();
+
+    const validRows = [];
+    const invalidRows = [];
+
+    rawRows.forEach((row, idx) => {
+      const rowIndex = idx + 2; // Excel row number (1-based header is row 1)
+      const regNo = String(row['Register Number'] || row['registerNumber'] || row['RegisterNo'] || '').trim();
+      const name = String(row['Name'] || row['name'] || row['FullName'] || '').trim();
+      const email = String(row['Email'] || row['email'] || row['CollegeEmail'] || '').trim().toLowerCase();
+      const rawYear = String(row['Year'] || row['year'] || '').trim();
+      const rawPassOut = String(row['Pass-out Year'] || row['passOutYear'] || row['PassoutYear'] || '').trim();
+
+      const errors = [];
+
+      if (!regNo) errors.push('Register Number is missing');
+      if (!name) errors.push('Name is missing');
+      if (!email) {
+        errors.push('Email is missing');
+      } else {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+          errors.push('Invalid email format');
+        } else if (cleanDomain && !email.endsWith(`@${cleanDomain}`)) {
+          errors.push(`Email domain must match @${cleanDomain}`);
+        }
+      }
+
+      const parsedYear = parseInt(rawYear);
+      if (!rawYear || isNaN(parsedYear) || parsedYear < 1 || parsedYear > 6) {
+        errors.push('Year must be a number between 1 and 6');
+      }
+
+      const parsedPassOut = parseInt(rawPassOut);
+      if (!rawPassOut || isNaN(parsedPassOut)) {
+        errors.push('Pass-out Year is missing or invalid');
+      } else if (parsedPassOut <= currentYear) {
+        errors.push(`Student passed out in ${parsedPassOut} (Pass-out year must be > ${currentYear})`);
+      }
+
+      // Check duplicates inside Excel file
+      if (regNo && seenRegNoInExcel.has(regNo.toLowerCase())) {
+        errors.push(`Duplicate Register Number "${regNo}" within Excel file`);
+      } else if (regNo) {
+        seenRegNoInExcel.add(regNo.toLowerCase());
+      }
+
+      if (email && seenEmailsInExcel.has(email)) {
+        errors.push(`Duplicate Email "${email}" within Excel file`);
+      } else if (email) {
+        seenEmailsInExcel.add(email);
+      }
+
+      // Check duplicates in Database
+      if (regNo && dbRegisterNumbers.has(regNo.toLowerCase())) {
+        errors.push(`Register Number "${regNo}" already exists in institution database`);
+      }
+
+      if (email && dbGlobalEmails.has(email)) {
+        errors.push(`Email "${email}" already registered in database`);
+      }
+
+      const rowObj = {
+        rowIndex,
+        registerNumber: regNo,
+        name,
+        email,
+        year: parsedYear || rawYear,
+        passOutYear: parsedPassOut || rawPassOut,
+      };
+
+      if (errors.length > 0) {
+        invalidRows.push({ ...rowObj, errors });
+      } else {
+        validRows.push(rowObj);
+      }
+    });
+
+    const commonPassword = generateCommonTemporaryPassword(institution.code);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        totalRows: rawRows.length,
+        validCount: validRows.length,
+        invalidCount: invalidRows.length,
+        validRows,
+        invalidRows,
+        commonTemporaryPassword: commonPassword,
+      },
+    });
+  } catch (error) {
+    console.error('validateStudentImport error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to process and validate Excel file.' });
+  }
+};
+
+// @desc    Commit confirmed valid student bulk import inside a database transaction
+// @route   POST /api/institution-admin/students/import
+// @access  Private (Institution Admin)
+const importStudents = async (req, res) => {
+  let t;
+  try {
+    const institutionId = req.user.institutionId;
+    const { validRows } = req.body;
+
+    if (!validRows || !Array.isArray(validRows) || validRows.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid student records provided for import.' });
+    }
+
+    const institution = await Institution.findByPk(institutionId);
+    if (!institution) {
+      return res.status(404).json({ success: false, message: 'Institution not found.' });
+    }
+
+    const commonPassword = generateCommonTemporaryPassword(institution.code);
+    const hashedPassword = await bcrypt.hash(commonPassword, 10);
+
+    t = await sequelize.transaction();
+
+    const createdUsers = [];
+    for (const item of validRows) {
+      const u = await User.create(
+        {
+          registerNumber: String(item.registerNumber).trim(),
+          name: String(item.name).trim(),
+          email: String(item.email).trim().toLowerCase(),
+          year: parseInt(item.year),
+          passOutYear: parseInt(item.passOutYear),
+          password: hashedPassword,
+          role: 'student',
+          institutionId,
+          status: 'active',
+          mustChangePassword: true,
+        },
+        { transaction: t }
+      );
+      createdUsers.push(u);
+    }
+
+    await t.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: `Successfully imported ${createdUsers.length} student records!`,
+      data: {
+        importedCount: createdUsers.length,
+        temporaryPassword: commonPassword,
+      },
+    });
+  } catch (error) {
+    if (t) await t.rollback();
+    console.error('importStudents transaction error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Database error during bulk student import transaction. Rolled back.',
+    });
+  }
+};
+
+// @desc    Create new vendor shop & vendor user account under institution
+// @route   POST /api/institution-admin/vendors
+// @access  Private (Institution Admin)
+const createVendor = async (req, res) => {
+  let t;
+  try {
+    const institutionId = req.user.institutionId;
+    const { shopName, ownerName, email, phone, category, description, location, operatingHours } = req.body;
+
+    if (!shopName || !shopName.trim()) {
+      return res.status(400).json({ success: false, message: 'Shop Name is required.' });
+    }
+    if (!ownerName || !ownerName.trim()) {
+      return res.status(400).json({ success: false, message: 'Owner Name is required.' });
+    }
+    if (!email || !email.trim()) {
+      return res.status(400).json({ success: false, message: 'Owner Email is required.' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const existingUser = await User.findOne({ where: { email: normalizedEmail } });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: 'An account with this email address already exists.' });
+    }
+
+    const institution = await Institution.findByPk(institutionId);
+    if (!institution) {
+      return res.status(404).json({ success: false, message: 'Institution not found.' });
+    }
+
+    const vendorId = `vnd_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`;
+    const commonPassword = generateCommonTemporaryPassword(institution.code);
+    const hashedPassword = await bcrypt.hash(commonPassword, 10);
+
+    t = await sequelize.transaction();
+
+    const vendor = await Vendor.create(
+      {
+        id: vendorId,
+        name: ownerName.trim(),
+        shopName: shopName.trim(),
+        category: category || 'Food',
+        description: description ? description.trim() : 'Campus vendor shop.',
+        location: location ? location.trim() : 'Student Union Building',
+        operatingHours: operatingHours || '8:00 AM - 9:00 PM',
+        institutionId,
+        status: 'active',
+        isOpen: true,
+      },
+      { transaction: t }
+    );
+
+    const vendorUser = await User.create(
+      {
+        name: ownerName.trim(),
+        email: normalizedEmail,
+        password: hashedPassword,
+        role: 'vendor',
+        institutionId,
+        vendorId: vendor.id,
+        status: 'active',
+        mustChangePassword: true,
+      },
+      { transaction: t }
+    );
+
+    await t.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: `Vendor shop "${vendor.shopName}" created successfully!`,
+      data: {
+        vendor,
+        user: {
+          id: vendorUser.id,
+          email: vendorUser.email,
+          role: vendorUser.role,
+        },
+        temporaryPassword: commonPassword,
+      },
+    });
+  } catch (error) {
+    if (t) await t.rollback();
+    console.error('createVendor error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to create vendor shop.' });
+  }
+};
+
+// @desc    Download standard XLSX template for Vendor Bulk Import
+// @route   GET /api/institution-admin/vendors/template
+// @access  Private (Institution Admin)
+const downloadVendorTemplate = async (req, res) => {
+  try {
+    const institutionId = req.user.institutionId;
+    const institution = await Institution.findByPk(institutionId);
+    const instDomain = institution?.domain || 'stanford.edu';
+
+    const wb = xlsx.utils.book_new();
+    const templateData = [
+      ['Shop Name', 'Owner Name', 'Email', 'Phone', 'Category', 'Description', 'Location', 'Operating Hours'],
+      ['Campus Delights', 'Robert Paul', `robert@${instDomain}`, '+1 555-0192', 'Food', 'Fresh wraps & juices', 'Food Court Stall 4', '8:00 AM - 9:00 PM'],
+      ['Campus Print Hub', 'Sarah Connor', `sarah@${instDomain}`, '+1 555-0193', 'Printing', 'High speed document printing', 'Library Ground Floor', '9:00 AM - 8:00 PM'],
+    ];
+
+    const ws = xlsx.utils.aoa_to_sheet(templateData);
+    ws['!cols'] = [{ wch: 22 }, { wch: 20 }, { wch: 26 }, { wch: 16 }, { wch: 14 }, { wch: 30 }, { wch: 25 }, { wch: 20 }];
+    xlsx.utils.book_append_sheet(wb, ws, 'Vendor Import Template');
+
+    const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=ShopDrop_Vendor_Import_Template.xlsx');
+    return res.send(buffer);
+  } catch (error) {
+    console.error('downloadVendorTemplate error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to generate vendor import template.' });
+  }
+};
+
+// @desc    Parse and validate uploaded Vendor Excel file
+// @route   POST /api/institution-admin/vendors/validate-import
+// @access  Private (Institution Admin)
+const validateVendorImport = async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ success: false, message: 'Please upload an Excel file (.xlsx or .xls).' });
+    }
+
+    const institutionId = req.user.institutionId;
+    const institution = await Institution.findByPk(institutionId);
+    if (!institution) {
+      return res.status(404).json({ success: false, message: 'Institution not found.' });
+    }
+
+    const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
+    const firstSheetName = wb.SheetNames[0];
+    const sheet = wb.Sheets[firstSheetName];
+    const rawRows = xlsx.utils.sheet_to_json(sheet, { defval: '' });
+
+    if (!rawRows || rawRows.length === 0) {
+      return res.status(400).json({ success: false, message: 'Uploaded Excel file is empty.' });
+    }
+
+    const allGlobalUsers = await User.findAll({ attributes: ['email'] });
+    const dbGlobalEmails = new Set(allGlobalUsers.map((u) => u.email.trim().toLowerCase()));
+
+    const existingVendorsInInst = await Vendor.findAll({
+      where: { institutionId },
+      attributes: ['shopName'],
+    });
+    const dbShopNames = new Set(existingVendorsInInst.map((v) => v.shopName.trim().toLowerCase()));
+
+    const seenEmailsInExcel = new Set();
+    const seenShopNamesInExcel = new Set();
+
+    const validRows = [];
+    const invalidRows = [];
+
+    rawRows.forEach((row, idx) => {
+      const rowIndex = idx + 2;
+      const shopName = String(row['Shop Name'] || row['shopName'] || row['Shop'] || '').trim();
+      const ownerName = String(row['Owner Name'] || row['ownerName'] || row['Owner'] || '').trim();
+      const email = String(row['Email'] || row['email'] || '').trim().toLowerCase();
+      const phone = String(row['Phone'] || row['phone'] || '').trim();
+      const category = String(row['Category'] || row['category'] || 'Food').trim();
+      const description = String(row['Description'] || row['description'] || '').trim();
+      const location = String(row['Location'] || row['location'] || '').trim();
+      const operatingHours = String(row['Operating Hours'] || row['operatingHours'] || '8:00 AM - 9:00 PM').trim();
+
+      const errors = [];
+
+      if (!shopName) errors.push('Shop Name is missing');
+      if (!ownerName) errors.push('Owner Name is missing');
+      if (!email) {
+        errors.push('Email is missing');
+      } else {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) errors.push('Invalid email format');
+      }
+
+      if (shopName && seenShopNamesInExcel.has(shopName.toLowerCase())) {
+        errors.push(`Duplicate Shop Name "${shopName}" within Excel file`);
+      } else if (shopName) {
+        seenShopNamesInExcel.add(shopName.toLowerCase());
+      }
+
+      if (email && seenEmailsInExcel.has(email)) {
+        errors.push(`Duplicate Email "${email}" within Excel file`);
+      } else if (email) {
+        seenEmailsInExcel.add(email);
+      }
+
+      if (shopName && dbShopNames.has(shopName.toLowerCase())) {
+        errors.push(`Shop Name "${shopName}" already exists in institution database`);
+      }
+
+      if (email && dbGlobalEmails.has(email)) {
+        errors.push(`Email "${email}" already registered in database`);
+      }
+
+      const rowObj = {
+        rowIndex,
+        shopName,
+        ownerName,
+        email,
+        phone,
+        category,
+        description,
+        location,
+        operatingHours,
+      };
+
+      if (errors.length > 0) {
+        invalidRows.push({ ...rowObj, errors });
+      } else {
+        validRows.push(rowObj);
+      }
+    });
+
+    const commonPassword = generateCommonTemporaryPassword(institution.code);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        totalRows: rawRows.length,
+        validCount: validRows.length,
+        invalidCount: invalidRows.length,
+        validRows,
+        invalidRows,
+        commonTemporaryPassword: commonPassword,
+      },
+    });
+  } catch (error) {
+    console.error('validateVendorImport error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to process vendor Excel file.' });
+  }
+};
+
+// @desc    Commit confirmed valid vendor bulk import inside a database transaction
+// @route   POST /api/institution-admin/vendors/import
+// @access  Private (Institution Admin)
+const importVendors = async (req, res) => {
+  let t;
+  try {
+    const institutionId = req.user.institutionId;
+    const { validRows } = req.body;
+
+    if (!validRows || !Array.isArray(validRows) || validRows.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid vendor records provided for import.' });
+    }
+
+    const institution = await Institution.findByPk(institutionId);
+    if (!institution) {
+      return res.status(404).json({ success: false, message: 'Institution not found.' });
+    }
+
+    const commonPassword = generateCommonTemporaryPassword(institution.code);
+    const hashedPassword = await bcrypt.hash(commonPassword, 10);
+
+    t = await sequelize.transaction();
+
+    const createdVendors = [];
+    for (const item of validRows) {
+      const vendorId = `vnd_${Date.now().toString(36)}_${Math.floor(Math.random() * 10000)}`;
+
+      const vendor = await Vendor.create(
+        {
+          id: vendorId,
+          name: String(item.ownerName).trim(),
+          shopName: String(item.shopName).trim(),
+          category: item.category || 'Food',
+          description: item.description || 'Campus vendor shop.',
+          location: item.location || 'Student Union Building',
+          operatingHours: item.operatingHours || '8:00 AM - 9:00 PM',
+          institutionId,
+          status: 'pending', // Follows approval governance
+          isOpen: true,
+        },
+        { transaction: t }
+      );
+
+      await User.create(
+        {
+          name: String(item.ownerName).trim(),
+          email: String(item.email).trim().toLowerCase(),
+          password: hashedPassword,
+          role: 'vendor',
+          institutionId,
+          vendorId: vendor.id,
+          status: 'active',
+          mustChangePassword: true,
+        },
+        { transaction: t }
+      );
+
+      createdVendors.push(vendor);
+    }
+
+    await t.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: `Successfully imported ${createdVendors.length} vendor shops!`,
+      data: {
+        importedCount: createdVendors.length,
+        temporaryPassword: commonPassword,
+      },
+    });
+  } catch (error) {
+    if (t) await t.rollback();
+    console.error('importVendors error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Database transaction error during bulk vendor import.',
     });
   }
 };
@@ -946,12 +1564,19 @@ module.exports = {
   updateVendorApplicationStatus,
   getVendorsList,
   updateVendorStatus,
+  createVendor,
+  downloadVendorTemplate,
+  validateVendorImport,
+  importVendors,
   getComplaints,
   updateComplaintStatus,
   getInstitutionAnalytics,
   getStudents,
   getStudentDetails,
   createStudent,
+  downloadStudentTemplate,
+  validateStudentImport,
+  importStudents,
   updateStudent,
   updateStudentStatus,
 };

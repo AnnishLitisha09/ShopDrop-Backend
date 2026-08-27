@@ -96,6 +96,10 @@ db.initDb = async () => {
     const tableMigrations = {
       users: [
         'savedAddress JSON',
+        'registerNumber VARCHAR(255)',
+        'year INT',
+        'passOutYear INT',
+        'mustChangePassword TINYINT(1) DEFAULT 0',
       ],
       institutions: [
         'addressFieldsConfig JSON',
@@ -179,13 +183,27 @@ db.initDb = async () => {
         code: 'STANFORD',
         logoUrl: 'https://images.unsplash.com/photo-1541339907198-e08756dedf3f?w=150',
         addressFieldsConfig: defaultAddressConfig,
+        city: 'Palo Alto',
+        domain: 'stanford.edu',
         status: 'active',
       },
     });
 
-    if (inst && !inst.addressFieldsConfig) {
-      inst.addressFieldsConfig = defaultAddressConfig;
-      await inst.save();
+    if (inst) {
+      let updated = false;
+      if (!inst.addressFieldsConfig) {
+        inst.addressFieldsConfig = defaultAddressConfig;
+        updated = true;
+      }
+      if (!inst.domain) {
+        inst.domain = 'stanford.edu';
+        updated = true;
+      }
+      if (!inst.city) {
+        inst.city = 'Palo Alto';
+        updated = true;
+      }
+      if (updated) await inst.save();
     }
 
     // Seed default data if vendors table is empty
@@ -361,6 +379,7 @@ db.initDb = async () => {
           category: 'Meals',
           imageUrl: 'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=400',
           isAvailable: true,
+          stock: 12,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_bites_001',
         },
@@ -372,6 +391,7 @@ db.initDb = async () => {
           category: 'Snacks',
           imageUrl: 'https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=400',
           isAvailable: true,
+          stock: 4,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_bites_001',
         },
@@ -383,6 +403,7 @@ db.initDb = async () => {
           category: 'Meals',
           imageUrl: 'https://images.unsplash.com/photo-1626700051175-6818013e1d4f?w=400',
           isAvailable: true,
+          stock: 0,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_bites_001',
         },
@@ -394,6 +415,7 @@ db.initDb = async () => {
           category: 'Beverages',
           imageUrl: 'https://images.unsplash.com/photo-1556679343-c7306c1976bc?w=400',
           isAvailable: true,
+          stock: 15,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_bites_001',
         },
@@ -405,6 +427,7 @@ db.initDb = async () => {
           category: 'Beverages',
           imageUrl: 'https://images.unsplash.com/photo-1517701604599-bb29b565090c?w=400',
           isAvailable: true,
+          stock: 8,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_coffee_004',
         },
@@ -416,6 +439,7 @@ db.initDb = async () => {
           category: 'Combos',
           imageUrl: 'https://images.unsplash.com/photo-1555507036-ab1f4038808a?w=400',
           isAvailable: true,
+          stock: 3,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_coffee_004',
         },
@@ -427,6 +451,7 @@ db.initDb = async () => {
           category: 'Notebooks',
           imageUrl: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=400',
           isAvailable: true,
+          stock: 25,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_stationery_002',
         },
@@ -438,6 +463,7 @@ db.initDb = async () => {
           category: 'Pens & Stationery',
           imageUrl: 'https://images.unsplash.com/photo-1585336261026-8f57857820f2?w=400',
           isAvailable: true,
+          stock: 10,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_stationery_002',
         },
@@ -449,6 +475,7 @@ db.initDb = async () => {
           category: 'Printing',
           imageUrl: 'https://images.unsplash.com/photo-1562654501-a0ccc0fc3fb1?w=400',
           isAvailable: true,
+          stock: 100,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_print_003',
         },
@@ -460,6 +487,7 @@ db.initDb = async () => {
           category: 'Apparel',
           imageUrl: 'https://images.unsplash.com/photo-1556905055-8f358a7a47b2?w=400',
           isAvailable: true,
+          stock: 2,
           institutionId: 'inst_stanford_001',
           vendorId: 'vnd_gifts_005',
         },
