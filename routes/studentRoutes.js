@@ -3,7 +3,9 @@ const {
   getHomeData,
   getVendorDetails,
   getProductDetails,
+  createPaymentOrder,
   createOrder,
+  cancelStudentOrder,
   getOrderDetails,
   getOrders,
   createReview,
@@ -18,7 +20,11 @@ const router = express.Router();
 router.get('/home', protect, getHomeData);
 router.get('/vendors/:id', protect, getVendorDetails);
 router.get('/products/:id', protect, getProductDetails);
+
+// Payment & Order routes
+router.post('/payment/create-order', protect, createPaymentOrder);
 router.post('/orders', protect, createOrder);
+router.post('/orders/:id/cancel', protect, cancelStudentOrder);
 router.get('/orders', protect, getOrders);
 router.get('/orders/:id', protect, getOrderDetails);
 router.post('/reviews', protect, createReview);

@@ -51,6 +51,46 @@ module.exports = (sequelize) => {
       type: DataTypes.STRING,
       allowNull: true,
     },
+    paymentId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    paymentOrderId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    paymentStatus: {
+      type: DataTypes.STRING,
+      defaultValue: 'paid',
+    },
+    refundStatus: {
+      type: DataTypes.STRING,
+      defaultValue: 'none',
+    },
+    refundAmount: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+    },
+    cancellationFee: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+    },
+    refundTxnId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    cancelledBy: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    cancelReason: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    cancellationWindowExpiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   }, {
     tableName: 'orders',
     timestamps: true,

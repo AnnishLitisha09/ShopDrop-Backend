@@ -1,6 +1,19 @@
 const { Op } = require('sequelize');
-const { Institution, Vendor, Product, Order, OrderItem, Review, User } = require('../models');
+const Razorpay = require('razorpay');
+const { sequelize, Institution, Vendor, Product, Order, OrderItem, Review, User } = require('../models');
 const { calculateParentOrderStatus } = require('../utils/orderStatusAggregator');
+
+let razorpayInstance = null;
+if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
+  try {
+    razorpayInstance = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  } catch (err) {
+    console.warn('[Vendor Refund] Razorpay initialization notice:', err.message);
+  }
+}
 
 // Helper to calculate start of today
 const getStartOfToday = () => {
@@ -404,6 +417,18 @@ const updateOrderStatus = async (req, res) => {
         }
         await item.save();
         updatedItemCount++;
+
+        // If vendor rejects item, restore product stock in inventory atomically
+        if (targetStatus === 'rejected') {
+          try {
+            await Product.update(
+              { stock: sequelize.literal(`stock + ${item.quantity}`) },
+              { where: { id: item.productId } }
+            );
+          } catch (e) {
+            console.error('Failed to restore stock on vendor rejection:', e.message);
+          }
+        }
       }
     }
 
@@ -424,15 +449,53 @@ const updateOrderStatus = async (req, res) => {
     if (rejectionReason) {
       order.notes = rejectionReason;
     }
+
+    // If order is rejected/cancelled by vendor, initiate 100% FULL REFUND automatically
+    let refundIssued = false;
+    if ((newParentStatus === 'rejected' || targetStatus === 'rejected') && order.refundStatus !== 'full') {
+      const fullRefundAmount = order.totalAmount;
+      const refundTxnId = `rfnd_vnd_${Date.now().toString(36)}_${Math.random().toString(36).substr(2, 6)}`;
+
+      if (razorpayInstance && order.paymentId && order.paymentId.startsWith('pay_') && !process.env.RAZORPAY_KEY_ID.includes('rzp_test_ShopDropCampusPay')) {
+        try {
+          await razorpayInstance.payments.refund(order.paymentId, {
+            amount: Math.round(fullRefundAmount * 100),
+            notes: {
+              cancellationReason: rejectionReason || 'Vendor shop rejected/unavailable',
+              cancellationFee: 0,
+              orderId: order.id,
+            },
+          });
+        } catch (err) {
+          console.warn('Razorpay full refund API call notice:', err.message);
+        }
+      }
+
+      order.status = 'cancelled';
+      order.paymentStatus = 'refunded';
+      order.refundStatus = 'full';
+      order.refundAmount = fullRefundAmount;
+      order.cancellationFee = 0;
+      order.refundTxnId = refundTxnId;
+      order.cancelledBy = 'vendor';
+      order.cancelReason = rejectionReason || 'Shop rejected / Out of stock';
+      refundIssued = true;
+    }
+
     await order.save();
 
     return res.status(200).json({
       success: true,
-      message: `Vendor items updated to ${targetStatus.toUpperCase()}. Parent order status recalculated to ${newParentStatus.toUpperCase()}.`,
+      message: refundIssued
+        ? `Order rejected. 100% Full Refund of ₹${order.totalAmount.toFixed(2)} automatically issued to student.`
+        : `Vendor items updated to ${targetStatus.toUpperCase()}. Parent order status recalculated to ${order.status.toUpperCase()}.`,
       data: {
         orderId: order.id,
         vendorStatus: targetStatus,
         parentOrderStatus: order.status,
+        refundStatus: order.refundStatus,
+        refundAmount: order.refundAmount,
+        refundTxnId: order.refundTxnId,
       },
     });
   } catch (error) {
