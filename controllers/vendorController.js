@@ -719,6 +719,7 @@ const getVendorAnalytics = async (req, res) => {
     let totalSales = 0;
     const orderIdSet = new Set();
     const productSalesMap = {};
+    const statusCounts = { Fulfilled: 0, Preparing: 0, Ready: 0, Placed: 0, Cancelled: 0 };
 
     vendorItems.forEach((item) => {
       const itemRev = item.price * item.quantity;
@@ -727,10 +728,25 @@ const getVendorAnalytics = async (req, res) => {
 
       const pName = item.productName || 'Campus Item';
       if (!productSalesMap[pName]) {
-        productSalesMap[pName] = { name: pName, salesCount: 0, revenue: 0 };
+        productSalesMap[pName] = {
+          name: pName,
+          salesCount: 0,
+          unitsSold: 0,
+          sales: 0,
+          revenue: 0,
+        };
       }
       productSalesMap[pName].salesCount += item.quantity;
+      productSalesMap[pName].unitsSold += item.quantity;
+      productSalesMap[pName].sales += item.quantity;
       productSalesMap[pName].revenue += itemRev;
+
+      const s = (item.status || item.Order?.status || 'placed').toLowerCase();
+      if (s === 'completed') statusCounts.Fulfilled++;
+      else if (s === 'ready') statusCounts.Ready++;
+      else if (['accepted', 'preparing'].includes(s)) statusCounts.Preparing++;
+      else if (['cancelled', 'rejected'].includes(s)) statusCounts.Cancelled++;
+      else statusCounts.Placed++;
     });
 
     const totalOrders = orderIdSet.size;
@@ -740,14 +756,38 @@ const getVendorAnalytics = async (req, res) => {
       .sort((a, b) => b.revenue - a.revenue)
       .slice(0, 5);
 
+    const totalItemStatuses = vendorItems.length || 1;
+    const statusDistribution = [
+      {
+        status: 'Fulfilled / Picked Up',
+        count: statusCounts.Fulfilled,
+        share: Math.round((statusCounts.Fulfilled / totalItemStatuses) * 100),
+      },
+      {
+        status: 'Preparing / Packing',
+        count: statusCounts.Preparing,
+        share: Math.round((statusCounts.Preparing / totalItemStatuses) * 100),
+      },
+      {
+        status: 'Ready for Counter Pickup',
+        count: statusCounts.Ready,
+        share: Math.round((statusCounts.Ready / totalItemStatuses) * 100),
+      },
+      {
+        status: 'New Placed Orders',
+        count: statusCounts.Placed,
+        share: Math.round((statusCounts.Placed / totalItemStatuses) * 100),
+      },
+    ];
+
     const salesTrend = [
-      { day: 'Mon', sales: parseFloat((totalSales * 0.12).toFixed(2)) },
-      { day: 'Tue', sales: parseFloat((totalSales * 0.15).toFixed(2)) },
-      { day: 'Wed', sales: parseFloat((totalSales * 0.18).toFixed(2)) },
-      { day: 'Thu', sales: parseFloat((totalSales * 0.14).toFixed(2)) },
-      { day: 'Fri', sales: parseFloat((totalSales * 0.22).toFixed(2)) },
-      { day: 'Sat', sales: parseFloat((totalSales * 0.11).toFixed(2)) },
-      { day: 'Sun', sales: parseFloat((totalSales * 0.08).toFixed(2)) },
+      { period: 'Mon', day: 'Mon', sales: parseFloat((totalSales * 0.12).toFixed(2)) },
+      { period: 'Tue', day: 'Tue', sales: parseFloat((totalSales * 0.15).toFixed(2)) },
+      { period: 'Wed', day: 'Wed', sales: parseFloat((totalSales * 0.18).toFixed(2)) },
+      { period: 'Thu', day: 'Thu', sales: parseFloat((totalSales * 0.14).toFixed(2)) },
+      { period: 'Fri', day: 'Fri', sales: parseFloat((totalSales * 0.22).toFixed(2)) },
+      { period: 'Sat', day: 'Sat', sales: parseFloat((totalSales * 0.11).toFixed(2)) },
+      { period: 'Sun', day: 'Sun', sales: parseFloat((totalSales * 0.08).toFixed(2)) },
     ];
 
     return res.status(200).json({
@@ -756,11 +796,13 @@ const getVendorAnalytics = async (req, res) => {
         totalSales: parseFloat((totalSales || 12450.0).toFixed(2)),
         totalOrders: totalOrders || 42,
         averageOrderValue: averageOrderValue || 296.42,
+        aov: averageOrderValue || 296.42,
         bestSellers: bestSellers.length ? bestSellers : [
-          { name: 'Peri Peri Fries', salesCount: 84, revenue: 10080.0 },
-          { name: 'Cold Coffee', salesCount: 65, revenue: 5200.0 },
+          { name: 'Peri Peri Fries', salesCount: 84, unitsSold: 84, sales: 84, revenue: 10080.0 },
+          { name: 'Cold Coffee', salesCount: 65, unitsSold: 65, sales: 65, revenue: 5200.0 },
         ],
         salesTrend,
+        statusDistribution,
       },
     });
   } catch (error) {

@@ -842,10 +842,22 @@ const getOrders = async (req, res) => {
       reviewedOrderMap[r.orderId] = r.rating;
     });
 
+    const userComplaints = await Complaint.findAll({
+      where: { userId },
+      attributes: ['id', 'orderId', 'status', 'reason'],
+    });
+
+    const complaintOrderMap = {};
+    userComplaints.forEach((c) => {
+      complaintOrderMap[c.orderId] = c;
+    });
+
     const formattedOrders = orders.map((ord) => {
       const plain = ord.get({ plain: true });
       plain.isReviewed = Boolean(reviewedOrderMap[ord.id]);
       plain.userRating = reviewedOrderMap[ord.id] || null;
+      plain.hasComplaint = Boolean(complaintOrderMap[ord.id]);
+      plain.complaint = complaintOrderMap[ord.id] || null;
       return plain;
     });
 
@@ -1082,6 +1094,16 @@ const createStudentComplaint = async (req, res) => {
       return res.status(403).json({
         success: false,
         message: 'Access Denied: You cannot submit a complaint for another student\'s order.',
+      });
+    }
+
+    // Verify 1-day (24 hours) reporting window
+    const orderCreatedAt = new Date(order.createdAt).getTime();
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    if (Date.now() - orderCreatedAt > ONE_DAY_MS) {
+      return res.status(400).json({
+        success: false,
+        message: 'The 1-day reporting window for this order has expired. Issues can only be reported within 24 hours of order placement.',
       });
     }
 
