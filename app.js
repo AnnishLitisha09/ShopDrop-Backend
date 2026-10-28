@@ -12,14 +12,24 @@ const app = express();
 // Initialize Database & Seeding
 db.initDb();
 
-// Middleware
-app.use(helmet({ crossOriginResourcePolicy: false }));
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    credentials: true,
-  })
-);
+const corsOptions = {
+  origin: (origin, callback) => {
+    callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'X-Tunnel-Skip-Anti-Phishing-Page',
+  ],
+};
+
+app.use(helmet({ crossOriginResourcePolicy: false, crossOriginOpenerPolicy: false }));
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
